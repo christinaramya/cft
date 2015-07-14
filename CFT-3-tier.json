@@ -283,6 +283,19 @@
       }
     },
 
+    "InboundHTTPSPublicNetworkAclEntry" : {
+      "Type" : "AWS::EC2::NetworkAclEntry",
+      "Properties" : {
+        "NetworkAclId" : { "Ref" : "PublicNetworkAcl" },
+        "RuleNumber" : "103",
+        "Protocol" : "6",
+        "RuleAction" : "allow",
+        "Egress" : "false",
+        "CidrBlock" : "0.0.0.0/0",
+        "PortRange" : { "From" : "443", "To" : "443" }
+      }
+    },
+
     "OutboundPublicNetworkAclEntry" : {
       "Type" : "AWS::EC2::NetworkAclEntry",
       "Properties" : {
@@ -318,7 +331,7 @@
         "CrossZone" : "true",
         "SecurityGroups" : [ { "Ref" : "PublicLoadBalancerSecurityGroup" } ],
         "Subnets" : [ { "Ref" : "PublicSubnet1" }, { "Ref" : "PublicSubnet2" } ],
-        "Listeners" : [ { "LoadBalancerPort" : "80", "InstancePort" : "80", "Protocol" : "HTTP" } ],
+        "Listeners" : [ { "LoadBalancerPort" : "80", "InstancePort" : "80", "Protocol" : "HTTP" }, { "LoadBalancerPort" : "443", "InstancePort" : "80", "Protocol" : "HTTPS", "SSLCertificateId" : "arn:aws:iam::338453561560:server-certificate/my-server-cert" } ],
         "HealthCheck" : {
           "Target" : "HTTP:80/",
           "HealthyThreshold" : "3",
@@ -332,10 +345,22 @@
     "PublicLoadBalancerSecurityGroup" : {
       "Type" : "AWS::EC2::SecurityGroup",
       "Properties" : {
-        "GroupDescription" : "Public ELB Security Group with HTTP access on port 80 from the internet",
+        "GroupDescription" : "Enable HTTP/HTTPS access on port 80/443 to 80",
+        "VpcId" : { "Ref" : "VPC" },
+        "SecurityGroupIngress" : [ { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "CidrIp" : "0.0.0.0/0"},
+        { "IpProtocol" : "tcp", "FromPort" : "443", "ToPort" : "443", "CidrIp" : "0.0.0.0/0"} ],
+        "SecurityGroupEgress" : [ { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "CidrIp" : "0.0.0.0/0"}]
+      }
+    },
+
+    "AppLoadBalancerSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable HTTP access on port 80 to 80/8080",
         "VpcId" : { "Ref" : "VPC" },
         "SecurityGroupIngress" : [ { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "CidrIp" : "0.0.0.0/0"} ],
-        "SecurityGroupEgress" : [ { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "CidrIp" : "0.0.0.0/0"} ]
+        "SecurityGroupEgress" : [ { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "CidrIp" : "0.0.0.0/0"},
+        { "IpProtocol" : "tcp", "FromPort" : "8080", "ToPort" : "8080", "CidrIp" : "0.0.0.0/0"} ]
       }
     },
 
@@ -378,7 +403,9 @@
                 "httpd" : []
               }
             },
-
+            "sources": {
+                  "/var/www/html": "https://s3.amazonaws.com/challenge-src/web-tier.zip"
+            },
             "files" : {
               "/var/www/html/index.html" : {
                 "content" : { "Fn::Join" : ["\n", [
@@ -464,11 +491,11 @@
     "AppServerSecurityGroup" : {
       "Type" : "AWS::EC2::SecurityGroup",
       "Properties" : {
-        "GroupDescription" : "Allow access from load balancer and bastion as well as outbound HTTP and HTTPS traffic",
+        "GroupDescription" : "Allow access from load balancer and bastion as well as outbound HTTP traffic",
         "VpcId" : { "Ref" : "VPC" },
         "SecurityGroupIngress" : [
-          { "IpProtocol" : "tcp", "FromPort" : "8080", "ToPort" : "8080", "SourceSecurityGroupId" : { "Ref" : "PublicLoadBalancerSecurityGroup" } } ,
-          { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "SourceSecurityGroupId" : { "Ref" : "PublicLoadBalancerSecurityGroup" } } ,
+          { "IpProtocol" : "tcp", "FromPort" : "8080", "ToPort" : "8080", "SourceSecurityGroupId" : { "Ref" : "AppLoadBalancerSecurityGroup" } } ,
+          { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "SourceSecurityGroupId" : { "Ref" : "AppLoadBalancerSecurityGroup" } } ,
           { "IpProtocol" : "tcp", "FromPort" : "22", "ToPort" : "22", "CidrIp" : { "Ref" : "SSHLocation" } } ]
       }
     },
@@ -482,6 +509,9 @@
             "packages" : {
               "yum" : {
                 "java-1.7.0-openjdk-devel" : [],
+                "mysql"        : [],
+                "mysql-server" : [],
+                "mysql-libs"   : [],
                 "httpd" : []
               }
             },
@@ -541,6 +571,16 @@
         "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
           "#!/bin/bash -xe\n",
           "yum update -y aws-cfn-bootstrap\n",
+          "cd /home/ec2-user/\n",
+          "wget https://s3.amazonaws.com/challenge-src/service-tier.zip\n",
+          "unzip service-tier.zip\n",
+          "cd /home/ec2-user/service-tier\n",
+          "mkdir logs\n",
+          "cp /home/ec2-user/service-tier/gs-accessing-data-rest-0.1.0 /etc/init.d\n",
+          "chmod 0755 /etc/init.d/gs-accessing-data-rest-0.1.0\n",
+          "chmod -R 777 /home/ec2-user/service-tier\n",
+          "chkconfig --add gs-accessing-data-rest-0.1.0\n",
+          "chkconfig gs-accessing-data-rest-0.1.0 on\n",
 
           "# Install the sample application\n",
           "/opt/aws/bin/cfn-init -v ",
@@ -590,7 +630,7 @@
       "Type" : "AWS::ElasticLoadBalancing::LoadBalancer",
       "Properties" : {
         "CrossZone" : "true",
-        "SecurityGroups" : [ { "Ref" : "PublicLoadBalancerSecurityGroup" } ],
+        "SecurityGroups" : [ { "Ref" : "AppLoadBalancerSecurityGroup" } ],
         "Subnets" : [ { "Ref" : "PublicSubnet1" }, { "Ref" : "PublicSubnet2" } ],
         "Listeners" : [ { "LoadBalancerPort" : "80", "InstancePort" : "8080", "Protocol" : "HTTP" } ],
         "HealthCheck" : {
@@ -607,16 +647,31 @@
       "Type" : "AWS::RDS::DBInstance",
       "DependsOn" : "AppServerFleet",
       "Properties" : {
-        "DBName" : "mydb",
+        "DBName" : "taskmanager",
         "AllocatedStorage" : "5",
         "DBInstanceClass" : "db.t2.micro",
+        "DBParameterGroupName": {
+            "Ref": "MyRDSParamGroup"
+        },
         "Engine" : "MySQL",
-        "MasterUsername" : "admin",
+        "EngineVersion": "5.6",
+        "MasterUsername" : "root",
         "MasterUserPassword" : "password",
         "DBSubnetGroupName" : { "Ref" : "MyDBSubnetGroup" },
         "VPCSecurityGroups" : [ { "Ref" : "myVPCDBSecurityGroup" } ]        
       },
       "DeletionPolicy" : "Delete"
+    },
+
+    "MyRDSParamGroup": {
+        "Properties": {
+          "Description": "CloudFormation Sample Database Parameter Group",
+          "Family": "MySQL5.6",
+          "Parameters": {
+            "lower_case_table_names": "1"
+          }
+        },
+        "Type": "AWS::RDS::DBParameterGroup"
     },
 
     "myVPCDBSecurityGroup" : {
@@ -625,8 +680,7 @@
         "GroupDescription" : "Allow access from App server and allow mysql port from SSH location",
         "VpcId" : { "Ref" : "VPC" },
         "SecurityGroupIngress" : [
-          { "IpProtocol" : "tcp", "FromPort" : "3306", "ToPort" : "3306", "SourceSecurityGroupId" : { "Ref" : "AppServerSecurityGroup" } } ,
-          { "IpProtocol" : "tcp", "FromPort" : "3306", "ToPort" : "3306", "CidrIp" : { "Ref" : "SSHLocation" } } ]
+          { "IpProtocol" : "tcp", "FromPort" : "3306", "ToPort" : "3306", "SourceSecurityGroupId" : { "Ref" : "AppServerSecurityGroup" } } ]
       }
     },
 
@@ -656,7 +710,7 @@
                                       { "Fn::GetAtt": [ "MyDB", "Endpoint.Address" ] },
                                       ":",
                                       { "Fn::GetAtt": [ "MyDB", "Endpoint.Port" ] },
-                                      "/MyDatabase"]]}
+                                      "/taskmanager"]]}
     }    
   }
 }
